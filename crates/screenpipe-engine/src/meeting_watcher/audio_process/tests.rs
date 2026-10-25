@@ -2217,6 +2217,7 @@ fn end_after_mic_switch_rekey_suppresses_adopted_session_key() {
     let Some(AudioProcessStateAction::EndMeeting {
         meeting_id: 67,
         suppressed_session: Some(suppressed),
+        ..
     }) = action
     else {
         panic!("expected EndMeeting with a suppressed session, got {action:?}");

@@ -445,6 +445,7 @@ pub async fn run_audio_process_meeting_detection_loop(
                 AudioProcessStateAction::EndMeeting {
                     meeting_id,
                     suppressed_session,
+                    ..
                 } => {
                     last_ended_room = Some(EndedRoom {
                         meeting_id: *meeting_id,

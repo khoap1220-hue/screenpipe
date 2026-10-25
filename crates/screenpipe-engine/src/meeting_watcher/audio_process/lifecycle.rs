@@ -547,16 +547,30 @@ pub(crate) async fn apply_state_action(
         AudioProcessStateAction::EndMeeting {
             meeting_id,
             suppressed_session,
+            first_seen_at,
+            since,
+            ended_at,
+            is_browser,
         } => {
-            if let Some(session) = suppressed_session {
-                suppress_session(suppressed_sessions, session);
-            }
-            let now_ts = action_now_utc.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+            // Stop the live stream and clear the detector's in-meeting flag immediately
+            // at the close boundary so live transcription does not continue if the DB
+            // writer permit is temporarily contended. Durable `meeting_ended` finalization
+            // remains gated on successful persistence below.
+            sync_meeting_flag(false, None, in_meeting_flag, detector);
+            let _ = screenpipe_events::send_event(
+                screenpipe_audio::meeting_streaming::MEETING_STREAMING_STOP_EVENT,
+                serde_json::json!({ "meeting_id": meeting_id }),
+            );
+            let end_utc = episode_start_utc(ended_at, now, action_now_utc);
+            let now_ts = end_utc.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
             match db
                 .end_meeting_with_typed_text(meeting_id, &now_ts, true, None)
                 .await
             {
                 Ok(persisted_end) => {
+                    if let Some(session) = suppressed_session {
+                        suppress_session(suppressed_sessions, session);
+                    }
                     capture_meeting_outcome(db, meeting_id, *flap_count).await;
                     *flap_count = 0;
                     emit_ended_and_status(db, manual_meeting, meeting_id, &persisted_end).await;
@@ -566,9 +580,19 @@ pub(crate) async fn apply_state_action(
                         "audio-process meeting detector: failed to end meeting {}: {}",
                         meeting_id, e
                     );
+                    if let Some(session) = suppressed_session {
+                        *state = AudioProcessMeetingState::Ending {
+                            meeting_id,
+                            platform: session.platform.unwrap_or_default(),
+                            session_key: session.session_key,
+                            meeting_url: session.meeting_url,
+                            first_seen_at,
+                            since,
+                            is_browser,
+                        };
+                    }
                 }
             }
-            sync_meeting_flag(false, None, in_meeting_flag, detector);
         }
         AudioProcessStateAction::RoomChanged {
             ended_meeting_id,

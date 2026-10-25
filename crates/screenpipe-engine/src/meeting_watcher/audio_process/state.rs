@@ -56,6 +56,10 @@ pub(crate) enum AudioProcessStateAction {
     EndMeeting {
         meeting_id: i64,
         suppressed_session: Option<SuppressedSession>,
+        first_seen_at: Instant,
+        since: Instant,
+        ended_at: Instant,
+        is_browser: bool,
     },
     /// The live meeting's app moved to a different call: end the current row
     /// (`end_reason = room_changed`) and start a fresh one for the session the
@@ -502,6 +506,10 @@ fn advance_from_ending(
                     platform: Some(platform),
                     meeting_url,
                 }),
+                first_seen_at,
+                since,
+                ended_at: since + ending_grace,
+                is_browser,
             }),
         )
     } else {

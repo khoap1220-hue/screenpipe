@@ -451,20 +451,28 @@ pub(crate) async fn reclaim(
     if let Some(range) = range {
         rewrite(storage, pool, writer, range.0, Some(range)).await?;
     }
-    let permit = writer.lock().await?;
-    // Force the narrow partial index: installed databases can have stale
-    // sqlite_stat1 rows that otherwise make SQLite rescan all resident history.
-    // One established file-sized batch bounds writer occupancy; later
-    // maintenance turns durably drain the remainder.
-    sqlx::query(sqlx::AssertSqlSafe(super::cleanup_sql()))
+    // Scope the writer permit per statement so waiting live writers (e.g.
+    // meeting close persistence) can interleave between tombstone batch
+    // deletion and catalog state cleanup.
+    {
+        let permit = writer.lock().await?;
+        // Force the narrow partial index: installed databases can have stale
+        // sqlite_stat1 rows that otherwise make SQLite rescan all resident history.
+        // One established file-sized batch bounds writer occupancy; later
+        // maintenance turns durably drain the remainder.
+        sqlx::query(sqlx::AssertSqlSafe(super::cleanup_sql()))
+            .execute(permit.pool())
+            .await?;
+    }
+    {
+        let permit = writer.lock().await?;
+        sqlx::query(
+            "UPDATE _bulk_files SET state='retired' WHERE table_name='elements' AND state='encoding'",
+        )
         .execute(permit.pool())
         .await?;
-    sqlx::query(
-        "UPDATE _bulk_files SET state='retired' WHERE table_name='elements' AND state='encoding'",
-    )
-    .execute(permit.pool())
-    .await?;
-    sqlx::query("DELETE FROM _bulk_element_frames WHERE file_id IN (SELECT id FROM _bulk_files WHERE state='retired')").execute(permit.pool()).await?;
+        sqlx::query("DELETE FROM _bulk_element_frames WHERE file_id IN (SELECT id FROM _bulk_files WHERE state='retired')").execute(permit.pool()).await?;
+    }
     Ok(())
 }
 

@@ -33,6 +33,9 @@ use super::{
 /// speaker id, and detection telemetry, none of which should re-fire just
 /// because recording bounced mid-meeting.
 pub const MEETING_STREAMING_REATTACH_EVENT: &str = "meeting_streaming_reattach";
+/// Event topic used to stop the active live streaming session immediately at
+/// the observed meeting-end boundary before durable DB finalization completes.
+pub const MEETING_STREAMING_STOP_EVENT: &str = "meeting_streaming_stop";
 
 const LIVE_FINAL_PERSIST_ATTEMPTS: usize = 18;
 const LIVE_FINAL_PERSIST_RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -143,6 +146,9 @@ pub fn start_meeting_streaming_loop(
         let mut reattach_sub = screenpipe_events::subscribe_to_event::<MeetingLifecycleEvent>(
             MEETING_STREAMING_REATTACH_EVENT,
         );
+        let mut stop_sub = screenpipe_events::subscribe_to_event::<MeetingLifecycleEvent>(
+            MEETING_STREAMING_STOP_EVENT,
+        );
         let mut inactivity_tick = tokio::time::interval(LIVE_INACTIVITY_CHECK_INTERVAL);
         let mut active: Option<ActiveMeetingStream> = None;
 
@@ -244,6 +250,32 @@ pub fn start_meeting_streaming_loop(
                         attendee_keyterms,
                     )
                     .await;
+                }
+                Some(event) = stop_sub.next() => {
+                    let Some(meeting_id) = event.data.resolved_meeting_id() else {
+                        continue;
+                    };
+                    match active.take() {
+                        Some(session) if session.meeting_id == meeting_id => {
+                            let provider = session.provider.clone();
+                            let live = session.live_transcription_enabled;
+                            let live_covered = session.live_transcript_seen;
+                            emit_session_ended(session);
+                            audio_tap.set_active(false);
+                            audio_tap.set_background_suppressed(false);
+                            if live_covered {
+                                mark_live_covered_chunks(&db, meeting_id).await;
+                            }
+                            emit_status(false, None, &provider, live, None);
+                        }
+                        Some(session) => {
+                            active = Some(session);
+                        }
+                        None => {
+                            audio_tap.set_active(false);
+                            audio_tap.set_background_suppressed(false);
+                        }
+                    }
                 }
                 Some(event) = ended_sub.next() => {
                     let Some(meeting_id) = event.data.resolved_meeting_id() else {
